@@ -1,0 +1,6 @@
+# Os hooks usam só a biblioteca padrão (Python >= 3.11).
+# Estes pacotes são do e-mail e dos gráficos.
+markdown>=3.5
+matplotlib>=3.8
+# opcional, para guardar a senha SMTP no chaveiro do sistema:
+# keyring>=24

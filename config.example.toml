@@ -1,0 +1,93 @@
+# Configuração do claude-brain. Copie para config.toml (ignorado pelo git) e ajuste.
+# Outro lugar: defina CLAUDE_BRAIN_CONFIG=/caminho/do/config.toml.
+# Todos os caminhos são absolutos ou começam com ~. Nenhum segredo neste arquivo.
+
+# Caminhos que viram regra de permissão (vault, autosave.escrita, analise.pasta, fontes) não podem
+# ter espaço nem vírgula.
+# Raízes permitidas: vault, fontes, pastas do autosave e `pasta:` das notas precisam ficar
+# estritamente dentro de uma delas. Diretórios de sistema e pontos de montagem são sempre recusados.
+raizes = ["~"]
+
+# Vault Markdown (compatível com Obsidian). Precisa existir.
+vault = "~/notas/vault"
+
+# Fuso IANA usado para "hoje" e para as horas das conversas. Vazio = fuso do sistema.
+timezone = "UTC"
+
+# Logs (só status e códigos, arquivos 0600, rotação por tamanho) e estado da automação.
+# Vazio = $XDG_STATE_HOME/claude-brain (ou ~/.local/state/claude-brain).
+log_dir = ""
+estado_dir = ""
+
+# Binário do Claude Code, modelo opcional e teto de gasto por sessão automática (0 = sem teto).
+claude_bin = "claude"
+modelo = ""
+orcamento_usd = 0.0
+
+[autosave]
+# Opt-in: só conversas abertas dentro destas pastas são salvas. Lista vazia = nunca salva.
+pastas = ["~/projetos"]
+# Onde a sessão automática pode escrever (relativo ao vault; nada oculto; sem espaço nem vírgula,
+# porque cada item vira uma regra de permissão do Claude Code). Mudança fora daqui vira AVISO no
+# log; mudança em caminho que executa ou instrui (plugins do Obsidian, hooks do git, CLAUDE.md,
+# AGENTS.md, .claude/) é FALHA, esteja onde estiver.
+escrita = ["projetos", "conversas-avulsas", "Inicio.md"]
+# Arquivos que o próprio Obsidian reescreve sozinho e não contam como mudança indevida.
+ignorar_mudancas = [".obsidian/workspace.json", ".obsidian/workspace-mobile.json"]
+minimo_pedidos = 1     # pedidos novos do usuário desde a última tentativa
+espera_max_s = 120     # quanto esperar o Claude Code que fechou terminar de sair
+tempo_max_s = 1800     # tempo máximo do salvamento
+
+[retomada]
+limite_dias = 30       # depois disso a nota ganha o aviso "confira com o código antes de confiar"
+
+# Fontes que o ingest lê (só leitura). Uma tabela [[fontes]] por pasta.
+[[fontes]]
+nome = "diarios"
+caminho = "~/notas/diarios"
+padrao = "*.md"
+
+[analise]
+pasta = "analise"                  # relativo ao vault; único lugar onde a rotina escreve
+relatorios = "analise/relatorios"  # precisa ficar dentro de analise.pasta
+
+[rotina]
+dia_relatorio = 1      # dia ISO do relatório semanal: 1 = segunda ... 7 = domingo
+tempo_max_s = 1800     # por chamada do modelo
+commit = false         # true: se o vault for repositório git, commita só o que a rotina gerou
+
+[foco]
+tabela = "foco/Sessoes de foco.md"   # relativo ao vault
+duracao_min = 50                      # duração padrão de uma sessão (e de um "bloco" nas contas)
+virada_hora = 4                       # o dia de foco termina nesta hora, não à meia-noite
+alvo_dia_min = 90                     # um número, ou 7 números (seg..dom); semana = soma (10,5 h)
+categorias = ["leitura", "escrita", "codigo"]   # "?" é sempre aceito
+perto_dia_blocos = 2                  # avisa quando o melhor dia está a até N blocos
+perto_pct = 0.10                      # semana/mês: avisa a até 10% da melhor marca
+semanas_normal = 8                    # janela da média por dia da semana
+
+[email]
+ativo = false
+host = "smtp.exemplo.test"
+porta = 465
+seguranca = "ssl"                     # "ssl" (SMTPS, porta 465) ou "starttls" (porta 587)
+usuario = "remetente@exemplo.test"
+remetente = "remetente@exemplo.test"
+destino = "destino@exemplo.test"
+# Senha, nesta ordem: variável de ambiente, keyring (pacote opcional), arquivo 0600.
+senha_env = "CLAUDE_BRAIN_SMTP_SENHA"
+usar_keyring = false
+senha_arquivo = ""
+prefixo_assunto = "[claude-brain]"
+# Links clicáveis no e-mail só para estes domínios; os demais aparecem como texto (sem href).
+dominios_link = []
+
+[notificacao]
+backend = "nenhum"                    # nenhum | auto | notify-send | osascript | powershell
+
+[privacidade]
+# Arquivo com termos proibidos (uma regex por linha), FORA do repositório: nomes, empresas,
+# caminhos que nunca podem ir para commit ou e-mail. Vazio = só os padrões de segredo.
+termos_arquivo = ""
+# E-mails que a varredura aceita (endereço exato ou @dominio).
+emails_permitidos = ["@exemplo.test"]

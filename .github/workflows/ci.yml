@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Dependências
+        run: python -m pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check .
+      # O Claude Code não é instalado aqui: o teste que confere as flags no `claude --help`
+      # é pulado sozinho quando o binário não existe. Nada chama a API.
+      - name: Pytest
+        run: pytest -q

@@ -1,0 +1,19 @@
+# configuração real e segredos
+config.toml
+*.env
+.env
+
+# ambiente e cache
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# saídas locais
+logs/
+*.log
+*.lock
+exemplo/saida/
+
+# transcrições de conversa nunca entram no repositório
+*.jsonl
