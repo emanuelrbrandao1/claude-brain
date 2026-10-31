@@ -19,6 +19,13 @@ def restaura_handler_de_sigterm():
     signal.signal(signal.SIGTERM, anterior)
 
 
+@pytest.fixture(autouse=True)
+def sem_claude_pid(monkeypatch):
+    """Dentro de uma sessão do Claude Code o ambiente tem CLAUDE_PID; na CI, não. Sem isto,
+    o mesmo teste passa num lugar e falha no outro (o hook só consulta o `ps` sem CLAUDE_PID)."""
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+
+
 @pytest.fixture
 def vault(tmp_path):
     v = tmp_path / "vault"

@@ -357,7 +357,9 @@ def test_hook_sem_nada_a_fazer_nao_lanca_processo(config, monkeypatch):
     cfg = config()
     monkeypatch.delenv("CLAUDE_BRAIN_SEM_AUTOSAVE", raising=False)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "x", "cwd": "/fora"})))
+    # pid_do_claude consulta o `ps` (que também usa Popen); aqui só interessa se o hook LANÇA o filho
     with mock.patch("autosave.carregar_config", return_value=cfg), \
+            mock.patch("autosave.pid_do_claude", return_value=0), \
             mock.patch("autosave.subprocess.Popen") as popen:
         assert autosave.main([]) == 0
     popen.assert_not_called()
