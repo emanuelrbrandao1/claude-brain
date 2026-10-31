@@ -63,11 +63,13 @@ sequenceDiagram
   F->>F: pedidos novos desde a última tentativa (transcrição)
   F->>F: link simbólico inseguro nos caminhos de escrita? recusa
   F->>F: metadados + resumos dos dias antigos (tmp 0600)
-  F->>F: marca a tentativa (gravação atômica); retrato do vault inteiro
+  F->>F: retrato do vault inteiro e texto anterior das notas
   F->>C: argv restrito, aviso + pedido por stdin, cwd = vault
   C-->>F: JSON (result, is_error, subtype)
   F->>F: nota com o marcador da conversa mudou? caminho crítico mudou? (resto fora do permitido = AVISO)
-  F->>F: varredura dos arquivos alterados; log OK/NADA/FALHA; notificação se FALHA
+  F->>F: varredura dos arquivos alterados; log OK/NADA/FALHA
+  F->>F: OK: marca a conversa como salva · FALHA: agenda retentativa (10 min, 1 h, 6 h) ou desiste
+  F->>F: retentativas vencidas de outras conversas (até 3), cada uma com o lock
 ```
 
 ## Fluxo da rotina
@@ -75,7 +77,9 @@ sequenceDiagram
 1. `rotina.sh`: pergunta ao `rotina.py` onde fica o lock de instância (`estado_dir`), `flock -n`,
    `timeout`, `umask 077`. O `rotina.py` ainda segura o lock do vault, o mesmo do autosave.
 2. Lê a tabela de foco (linha inválida = FALHA com número da linha).
-3. **Ingest**: lista arquivos das fontes com mtime diferente do estado. Nada novo e tabela igual:
+3. Roda as retentativas vencidas do autosave (`autosave.py --pendentes`, outro processo).
+   **Ingest**: lista arquivos das fontes com mtime diferente do estado. Nada novo e tabela igual
+   (pelo sha256 do conteúdo das sessões, então corrigir os minutos de uma sessão conta como mudança):
    não chama o modelo. Senão, pedido com a lista e o resumo dos últimos 7 dias; pós-condição no
    `Registro analise.md`; só então avança o estado.
 4. **Relatório** da última semana ISO fechada, devido a partir do `dia_relatorio` da semana
@@ -119,7 +123,7 @@ vêm de lá. A configuração é validada ao carregar e falha com mensagem que d
 
 | Arquivo | Conteúdo |
 |---|---|
-| `estado_dir/autosave-estado.json` | id da conversa → momento da última tentativa |
+| `estado_dir/autosave-estado.json` | id da conversa → último salvamento OK, falhas, próxima retentativa, se desistiu |
 | `estado_dir/ingest-estado.json` | arquivo da fonte → mtime ingerido; assinatura da tabela de foco |
 | `estado_dir/rotina-pendencias.json` | arquivos à espera de commit e relatórios à espera de envio |
 | `estado_dir/*.lock` | `vault.lock` (autosave e rotina), `rotina.lock` (uma rotina por vez), `foco.lock` |

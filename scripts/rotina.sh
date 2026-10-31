@@ -5,8 +5,9 @@
 #
 # Uso: rotina.sh [--config ARQ] [--dry-run] [--so-ingest] [--sem-email] [--forcar-relatorio]
 # Variáveis: CLAUDE_BRAIN_PYTHON (padrão: .venv do repositório), CLAUDE_BRAIN_CONFIG (padrão:
-#            config.toml do repositório), CLAUDE_BRAIN_TIMEOUT (s; padrão: 3 × rotina.tempo_max_s + 300,
-#            calculado pelo rotina.py: espera do lock do vault + ingest + relatório + folga).
+#            config.toml do repositório), CLAUDE_BRAIN_TIMEOUT (s; padrão calculado pelo rotina.py:
+#            3 × 2 × autosave.tempo_max_s + 60 (até 3 retentativas, cada uma esperando o lock e
+#            rodando) + 3 × rotina.tempo_max_s (lock, ingest, relatório) + 300 de folga).
 # Ao estourar o tempo, o `timeout` manda SIGTERM: o rotina.py registra FALHA no log e notifica
 # antes de sair; 60 s depois, se ainda estiver vivo, vem o SIGKILL.
 set -euo pipefail

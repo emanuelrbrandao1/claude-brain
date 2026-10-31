@@ -28,6 +28,7 @@ import argparse
 import calendar
 import collections
 import datetime as dt
+import hashlib
 import math
 import re
 import statistics
@@ -134,6 +135,13 @@ def registrar(caminho: Path, linha: str, lock: Path) -> None:
 
 
 # ---------------------------------------------------------------- totais
+
+def assinatura(sessoes: list[Sessao]) -> str:
+    """sha256 do conteúdo normalizado das sessões: muda com qualquer correção (minutos, hora,
+    categoria, fonte), não só com sessão nova."""
+    linhas = sorted(f"{s.dia}|{s.fim}|{s.categoria}|{s.minutos}|{s.fonte}" for s in sessoes)
+    return hashlib.sha256("\n".join(linhas).encode()).hexdigest()
+
 
 def h(minutos: float) -> str:
     return f"{minutos / 60:.1f} h"

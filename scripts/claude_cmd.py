@@ -10,9 +10,11 @@ Só biblioteca padrão (usado pelos hooks).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -215,13 +217,82 @@ def ambiente_automatico(remover: tuple[str, ...] = ()) -> dict[str, str]:
     return env
 
 
+# Quanto `matar_grupo` espera depois do SIGTERM antes do SIGKILL (curto nos testes, via ambiente).
+# Nível intermediário (um script que lança outro): ESPERA_TERM_S no tempo esgotado e metade disso
+# quando ele próprio foi encerrado de fora. Folha (o `claude`, que não tem quem encerrar abaixo):
+# ESPERA_FOLHA_S, sempre menor que a metade de qualquer nível acima, para o SIGKILL de baixo
+# chegar antes do de cima mesmo se o `claude` ignorar o SIGTERM.
+ESPERA_TERM_S = float(os.environ.get("CLAUDE_BRAIN_ESPERA_TERM_S", "5"))
+ESPERA_FOLHA_S = min(1.0, ESPERA_TERM_S / 4)
+
+
+class Encerrado(BaseException):
+    """SIGTERM recebido. É BaseException para nenhum `except Exception` engolir: o processo tem de
+    passar pelo `except` de `rodar_em_grupo` (que encerra o grupo dos filhos) e sair."""
+
+
+def _ao_receber_sigterm(signum, frame):
+    raise Encerrado()
+
+
+def instalar_sigterm() -> None:
+    """Todo script que usa `rodar_em_grupo` e pode ser encerrado de fora instala isto: sem ele, o
+    SIGTERM mata o script na hora e o grupo que ele criou (o `claude`) fica órfão."""
+    signal.signal(signal.SIGTERM, _ao_receber_sigterm)
+
+
+def matar_grupo(proc: subprocess.Popen, espera_s: float | None = None) -> None:
+    """Encerra o grupo de processos do filho: SIGTERM, espera o filho por até `espera_s`, depois
+    SIGKILL no que sobrou do grupo.
+
+    O SIGTERM primeiro é o que alcança níveis abaixo: um filho que também usa `rodar_em_grupo`
+    (ex.: rotina → autosave.py → claude) transforma o sinal em `Encerrado` e encerra o próprio
+    grupo antes de sair. SIGKILL direto mataria só o filho e deixaria o neto, que está em outro
+    grupo, órfão."""
+    espera = ESPERA_TERM_S if espera_s is None else espera_s
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # o grupo já pode ter acabado
+        os.killpg(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=espera)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        proc.kill()
+
+
+def rodar_em_grupo(cmd: list[str], *, entrada: str | None = None, tempo_max_s: float,
+                   espera_term_s: float | None = None, **kwargs) -> tuple[int, str]:
+    """Roda `cmd` num grupo de processos próprio e devolve (código, stdout). Se o tempo acabar ou
+    vier uma exceção (inclusive `Encerrado`, do SIGTERM), encerra o grupo inteiro (`matar_grupo`)
+    antes de repassar a exceção: o `claude` não sobra órfão, escrevendo no vault sem lock e sem
+    pós-condição. `espera_term_s` fixa a espera entre SIGTERM e SIGKILL (usado para a folha)."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if entrada is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, **kwargs)
+    try:
+        saida, _ = proc.communicate(entrada, timeout=tempo_max_s)
+    except BaseException as e:
+        if espera_term_s is not None:
+            espera = espera_term_s
+        else:
+            # encerrado de fora: espera só metade, para terminar antes de quem está acima escalar
+            # para SIGKILL (que não daria chance a este `except`)
+            espera = ESPERA_TERM_S / 2 if isinstance(e, Encerrado) else ESPERA_TERM_S
+        matar_grupo(proc, espera)
+        raise
+    return proc.returncode, saida
+
+
 def rodar(cmd: list[str], pedido: str, *, cwd: Path, tempo_max_s: int,
           remover_env: tuple[str, ...] = ()) -> Resultado:
     try:
-        r = subprocess.run(cmd, input=pedido, cwd=cwd, env=ambiente_automatico(remover_env),
-                           capture_output=True, text=True, timeout=tempo_max_s)
+        # o `claude` é a folha da cadeia: espera curta e fixa antes do SIGKILL
+        codigo, saida = rodar_em_grupo(cmd, entrada=pedido, tempo_max_s=tempo_max_s, cwd=cwd,
+                                       espera_term_s=ESPERA_FOLHA_S, env=ambiente_automatico(remover_env))
     except subprocess.TimeoutExpired:
         return Resultado(ok=False, codigo=-1, subtipo="tempo-esgotado")
     except OSError as e:
         return Resultado(ok=False, codigo=-2, subtipo=f"nao-executou:{e.errno}")
-    return interpretar_saida(r.returncode, r.stdout)
+    return interpretar_saida(codigo, saida)

@@ -11,6 +11,13 @@ OK = claude_cmd.Resultado(True, 0, "success", "RESULTADO: salvo")
 SEGUNDA = dt.datetime(2030, 4, 15, 21, 0)
 
 
+@pytest.fixture(autouse=True)
+def sem_retentativas_do_autosave(request, monkeypatch):
+    """A rotina chama o autosave em outro processo; aqui isso é testado à parte."""
+    if "retentar_autosave_de_verdade" not in request.keywords:
+        monkeypatch.setattr(rotina, "retentar_autosave", lambda ex: None)
+
+
 @pytest.fixture
 def execucao(config, tmp_path):
     fonte = tmp_path / "diarios"
@@ -231,7 +238,7 @@ def test_tempo_total_cobre_lock_ingest_relatorio_e_folga(config, capsys):
     cfg = config(rotina={"tempo_max_s": 600})
     with mock.patch("rotina.carregar_config", return_value=cfg):
         assert rotina.main(["--tempo-total"]) == 0
-    assert int(capsys.readouterr().out) == 3 * 600 + rotina.FOLGA_S
+    assert int(capsys.readouterr().out) == 3 * 2 * cfg.autosave_tempo_max_s + 60 + 3 * 600 + rotina.FOLGA_S
 
 
 def test_sigterm_vira_falha_registrada(execucao):
@@ -303,3 +310,90 @@ def test_rotina_sh_aceita_as_duas_formas_de_config(tmp_path, vault, forma):
                        env={**os.environ, "CLAUDE_BRAIN_PYTHON": sys.executable}, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "estado" / "rotina.lock").exists()
+
+
+# ---------------------------------------------------------------- F1: assinatura da tabela de foco
+
+def _tabela(cfg, minutos=25):
+    cfg.foco.tabela.parent.mkdir(parents=True, exist_ok=True)
+    cfg.foco.tabela.write_text("| Data | Hora | Categoria | Minutos | Fonte |\n|---|---|---|---|---|\n"
+                               f"| 2030-04-14 | 20:00 | leitura | {minutos} | manual |\n")
+
+
+def test_corrigir_minutos_de_uma_sessao_muda_a_assinatura_e_chama_o_modelo(execucao):
+    ex = execucao()
+    _tabela(ex.cfg, 25)
+    with mock.patch("claude_cmd.rodar", side_effect=_modelo_escreve("analise/Registro analise.md")):
+        rotina.ingest(ex, rotina.ler_tabela(ex))
+    with mock.patch("claude_cmd.rodar") as rodar:   # nada mudou: nada novo, modelo não é chamado
+        rotina.ingest(ex, rotina.ler_tabela(ex))
+    rodar.assert_not_called()
+    _tabela(ex.cfg, 90)                               # mesma linha, só os minutos corrigidos
+    modelo = _modelo_escreve("analise/Registro analise.md", texto="atualizado\n")
+    with mock.patch("claude_cmd.rodar", side_effect=modelo) as rodar:
+        rotina.ingest(ex, rotina.ler_tabela(ex))
+    rodar.assert_called_once()
+    assert ex.falhas == []
+
+
+def test_assinatura_so_depende_do_conteudo(execucao):
+    import foco
+    ex = execucao()
+    _tabela(ex.cfg, 25)
+    a = foco.assinatura(rotina.ler_tabela(ex))
+    _tabela(ex.cfg, 25)
+    assert foco.assinatura(rotina.ler_tabela(ex)) == a
+    _tabela(ex.cfg, 26)
+    assert foco.assinatura(rotina.ler_tabela(ex)) != a
+
+
+# ---------------------------------------------------------------- F2: varredura sem commit nem e-mail
+
+@pytest.mark.parametrize("texto, codigo", [
+    ("## 2030-04-15 · ingest\n- ponto\n", 0),
+    ("senha: " + "naoconte123\n", 1),
+    ("```dataviewjs\ndv.x()\n```\n", 1),
+])
+def test_varredura_roda_mesmo_sem_commit_e_sem_email(execucao, texto, codigo):
+    ex = execucao(rotina={"commit": False}, email={"ativo": False})
+    with mock.patch("claude_cmd.rodar", _modelo_escreve("analise/Registro analise.md", texto=texto)), \
+            mock.patch("rotina.notificar") as notif, mock.patch("rotina.commitar") as commitar, \
+            mock.patch("rotina.enviar") as enviar:
+        assert rotina.executar(ex, True, False, False) == codigo
+    commitar.assert_not_called()
+    enviar.assert_not_called()
+    assert notif.called == bool(codigo)
+    if codigo:
+        assert any(f.startswith("varredura") for f in ex.falhas)
+
+
+# ---------------------------------------------------------------- F3: retentativas do autosave pela rotina
+
+@pytest.mark.retentar_autosave_de_verdade
+def test_rotina_dispara_retentativas_do_autosave(execucao, monkeypatch):
+    ex = execucao()
+    monkeypatch.setenv("CLAUDE_BRAIN_SEM_AUTOSAVE", "1")   # o rotina.sh exporta; o autosave não pode herdar
+    with mock.patch("claude_cmd.rodar_em_grupo", return_value=(0, "")) as rodar:
+        rotina.retentar_autosave(ex)
+    argv = rodar.call_args.args[0]
+    assert argv[-1] == "--pendentes" and argv[-4].endswith("autosave.py")
+    assert "CLAUDE_BRAIN_SEM_AUTOSAVE" not in rodar.call_args.kwargs["env"]
+    assert rodar.call_args.kwargs["tempo_max_s"] == 3 * 2 * ex.cfg.autosave_tempo_max_s + 60
+
+
+@pytest.mark.retentar_autosave_de_verdade
+def test_rotina_em_dry_run_nao_dispara_autosave(execucao, capsys):
+    ex = execucao(dry_run=True)
+    with mock.patch("claude_cmd.rodar_em_grupo") as rodar:
+        rotina.retentar_autosave(ex)
+    rodar.assert_not_called()
+    assert "retentativas vencidas" in capsys.readouterr().out
+
+
+@pytest.mark.retentar_autosave_de_verdade
+def test_retentativas_que_passam_do_tempo_viram_aviso(execucao):
+    import subprocess
+    ex = execucao()
+    with mock.patch("claude_cmd.rodar_em_grupo", side_effect=subprocess.TimeoutExpired("autosave", 1)):
+        rotina.retentar_autosave(ex)
+    assert "grupo de processos encerrado" in (ex.cfg.log_dir / "rotina.log").read_text()

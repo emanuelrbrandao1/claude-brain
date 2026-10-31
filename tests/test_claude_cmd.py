@@ -134,3 +134,199 @@ def test_flags_existem_no_help(cmd):
     ajuda = subprocess.run(["claude", "--help"], capture_output=True, text=True, timeout=60).stdout
     for flag in (a for a in cmd if a.startswith("--")):
         assert flag in ajuda, f"{flag} não aparece em `claude --help`"
+
+
+# ---------------------------------------------------------------- grupo de processos no tempo esgotado
+
+FILHO_COM_NETO = """
+import subprocess, sys, time
+neto = subprocess.Popen(["sleep", "30"])
+with open(sys.argv[1], "w") as f:
+    f.write(str(neto.pid))
+time.sleep(30)
+"""
+
+
+def _vivo(pid: int) -> bool:
+    try:
+        estado = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, IndexError):
+        return False
+    return estado != "Z"
+
+
+def _esperar_morrer(pid: int, limite_s: float = 5) -> bool:
+    import time
+    fim = time.monotonic() + limite_s
+    while time.monotonic() < fim:
+        if not _vivo(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _neto(tmp_path):
+    import sys
+    script = tmp_path / "filho.py"
+    script.write_text(FILHO_COM_NETO)
+    return [sys.executable, str(script), str(tmp_path / "neto.pid")], tmp_path / "neto.pid"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists() or not shutil.which("sleep"), reason="precisa de /proc")
+def test_tempo_esgotado_mata_o_neto_tambem(tmp_path):
+    cmd, arq_pid = _neto(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        claude_cmd.rodar_em_grupo(cmd, tempo_max_s=1.5)
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists() or not shutil.which("sleep"), reason="precisa de /proc")
+def test_rodar_com_tempo_esgotado_nao_deixa_claude_orfao(tmp_path):
+    cmd, arq_pid = _neto(tmp_path)
+    r = claude_cmd.rodar(cmd, "pedido", cwd=tmp_path, tempo_max_s=1.5)
+    assert r.subtipo == "tempo-esgotado" and not r.ok
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists() or not shutil.which("sleep"), reason="precisa de /proc")
+def test_excecao_durante_a_espera_tambem_mata_o_grupo(tmp_path, monkeypatch):
+    """Ex.: o SIGTERM da rotina vira exceção enquanto o claude roda."""
+    import time
+    cmd, arq_pid = _neto(tmp_path)
+    original = subprocess.Popen.communicate
+
+    def interrompida(self, *args, **kwargs):
+        if kwargs.get("timeout") != 30:          # só a espera principal é interrompida
+            return original(self, *args, **kwargs)
+        while not arq_pid.exists():
+            time.sleep(0.05)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrompida)
+    with pytest.raises(KeyboardInterrupt):
+        claude_cmd.rodar_em_grupo(cmd, tempo_max_s=30)
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+# ---------------------------------------------------------------- dois níveis: rotina → autosave.py → claude
+
+NETO = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(47)"
+MEIO = """
+import sys
+sys.path.insert(0, {scripts!r})
+import claude_cmd
+if {com_handler}:
+    claude_cmd.instalar_sigterm()
+claude_cmd.rodar_em_grupo([sys.executable, "-c", {neto!r}, sys.argv[1]], entrada="x", tempo_max_s=100)
+"""
+FORA = """
+import sys
+sys.path.insert(0, {scripts!r})
+import claude_cmd
+claude_cmd.instalar_sigterm()
+claude_cmd.rodar_em_grupo([sys.executable, sys.argv[1], sys.argv[2]], tempo_max_s=100)
+"""
+PRECISA_PROC = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="precisa de /proc")
+
+
+def _meio(tmp_path, com_handler=True):
+    import sys
+
+    from conftest import RAIZ
+    script = tmp_path / "meio.py"
+    script.write_text(MEIO.format(scripts=str(RAIZ / "scripts"), neto=NETO, com_handler=com_handler))
+    return [sys.executable, str(script), str(tmp_path / "neto.pid")], tmp_path / "neto.pid"
+
+
+def _esperar_arquivo(p: Path, limite_s: float = 10) -> None:
+    import time
+    fim = time.monotonic() + limite_s
+    while not p.exists() or not p.read_text():
+        assert time.monotonic() < fim, "o neto não começou"
+        time.sleep(0.05)
+
+
+@pytest.fixture
+def espera_curta(monkeypatch):
+    monkeypatch.setattr(claude_cmd, "ESPERA_TERM_S", 1.0)
+    monkeypatch.setenv("CLAUDE_BRAIN_ESPERA_TERM_S", "1")   # para os processos filhos
+
+
+@PRECISA_PROC
+def test_dois_niveis_tempo_esgotado_externo_mata_o_neto(tmp_path, espera_curta):
+    cmd, arq_pid = _meio(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        claude_cmd.rodar_em_grupo(cmd, tempo_max_s=2)
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+@PRECISA_PROC
+def test_dois_niveis_sigterm_no_externo_mata_o_neto(tmp_path, espera_curta):
+    import os
+    import signal
+    import sys
+
+    from conftest import RAIZ
+    meio, arq_pid = _meio(tmp_path)
+    fora = tmp_path / "fora.py"
+    fora.write_text(FORA.format(scripts=str(RAIZ / "scripts")))
+    proc = subprocess.Popen([sys.executable, str(fora), meio[1], meio[2]], start_new_session=True)
+    _esperar_arquivo(arq_pid)
+    os.kill(proc.pid, signal.SIGTERM)                      # o `timeout` do rotina.sh faz isto
+    assert proc.wait(timeout=15) != 0
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+@PRECISA_PROC
+def test_sem_o_handler_no_meio_o_neto_sobraria(tmp_path, espera_curta):
+    """Controle: é o handler de SIGTERM do nível do meio que alcança o neto (que está em outro grupo)."""
+    import os
+    import signal
+    cmd, arq_pid = _meio(tmp_path, com_handler=False)
+    with pytest.raises(subprocess.TimeoutExpired):
+        claude_cmd.rodar_em_grupo(cmd, tempo_max_s=2)
+    pid = int(arq_pid.read_text())
+    try:
+        assert not _esperar_morrer(pid, limite_s=1.5)
+    finally:
+        os.kill(pid, signal.SIGKILL)
+
+
+def test_encerrado_nao_e_engolido_por_except_exception():
+    assert not issubclass(claude_cmd.Encerrado, Exception)
+
+
+FOLHA_TEIMOSA = "trap '' TERM; echo $$ > {pid}; exec sleep 47"   # ignora SIGTERM (o exec herda o ignore)
+MEIO_COM_RODAR = """
+import sys
+sys.path.insert(0, {scripts!r})
+import claude_cmd
+claude_cmd.instalar_sigterm()
+claude_cmd.rodar(["bash", "-c", {folha!r}], "pedido", cwd={cwd!r}, tempo_max_s=100)
+"""
+
+
+@PRECISA_PROC
+@pytest.mark.skipif(not shutil.which("bash"), reason="precisa de bash")
+def test_tres_niveis_por_sigterm_com_folha_que_ignora_sigterm(tmp_path, espera_curta):
+    """fora (rotina) → meio (autosave.py, via claude_cmd.rodar) → folha (claude) que ignora SIGTERM:
+    a espera da folha é menor que a do meio, então o SIGKILL dela chega antes do de cima."""
+    import os
+    import signal
+    import sys
+
+    from conftest import RAIZ
+    arq_pid = tmp_path / "folha.pid"
+    meio = tmp_path / "meio.py"
+    meio.write_text(MEIO_COM_RODAR.format(scripts=str(RAIZ / "scripts"), cwd=str(tmp_path),
+                                          folha=FOLHA_TEIMOSA.format(pid=arq_pid)))
+    fora = tmp_path / "fora.py"
+    fora.write_text(FORA.format(scripts=str(RAIZ / "scripts")))
+    proc = subprocess.Popen([sys.executable, str(fora), str(meio), "nada"], start_new_session=True)
+    _esperar_arquivo(arq_pid)
+    os.kill(proc.pid, signal.SIGTERM)
+    assert proc.wait(timeout=15) != 0
+    assert _esperar_morrer(int(arq_pid.read_text()))
+
+
+def test_espera_da_folha_e_menor_que_a_de_qualquer_nivel_acima():
+    assert claude_cmd.ESPERA_FOLHA_S < claude_cmd.ESPERA_TERM_S / 2

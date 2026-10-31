@@ -1,3 +1,4 @@
+import signal
 import sys
 from pathlib import Path
 
@@ -7,6 +8,15 @@ RAIZ = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(RAIZ / "scripts"), str(RAIZ / "hooks")]
 
 from comum import montar_config  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def restaura_handler_de_sigterm():
+    """`autosave.main` e `rotina.main` instalam um handler de SIGTERM; chamados dentro do pytest,
+    ele ficaria valendo para o processo do pytest."""
+    anterior = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, anterior)
 
 
 @pytest.fixture

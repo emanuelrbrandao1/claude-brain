@@ -21,6 +21,9 @@ packages = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/e2e usa o Claude Code de verdade (custa dinheiro): fica fora da coleta padrão e da CI
+addopts = "--ignore=tests/e2e"
+markers = ["retentar_autosave_de_verdade: não desliga a chamada da rotina ao autosave --pendentes"]
 
 [tool.ruff]
 line-length = 120

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import signal
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -50,18 +50,47 @@ REGISTRO = "Registro analise.md"
 FOLGA_S = 300
 
 
-class Interrompida(Exception):
-    """A rotina recebeu SIGTERM (normalmente o `timeout` do rotina.sh)."""
+# A rotina recebe SIGTERM do `timeout` do rotina.sh: o handler (claude_cmd) vira `Encerrado`, que
+# encerra o grupo do `claude` ou do autosave.py em andamento e chega a `executar_protegido`.
+Interrompida = claude_cmd.Encerrado
+_ao_receber_sigterm = claude_cmd._ao_receber_sigterm
 
 
-def _ao_receber_sigterm(signum, frame):
-    raise Interrompida()
+RETENTATIVAS_DO_AUTOSAVE = 3  # o mesmo MAX_PENDENTES_POR_VEZ do hooks/autosave.py
+
+
+def tempo_autosave(cfg: Config) -> int:
+    """Até 3 retentativas, cada uma podendo esperar o lock do vault e depois rodar a sessão (cada
+    passo até `autosave.tempo_max_s`), mais um minuto."""
+    return RETENTATIVAS_DO_AUTOSAVE * 2 * cfg.autosave_tempo_max_s + 60
 
 
 def tempo_total(cfg: Config) -> int:
-    """Tempo máximo da rotina inteira: esperar o lock do vault, o ingest e o relatório podem levar
-    `rotina.tempo_max_s` cada, mais uma folga para gráficos, varredura, commit e e-mail."""
-    return 3 * cfg.rotina_tempo_max_s + FOLGA_S
+    """Tempo máximo da rotina inteira: as retentativas do autosave, e então esperar o lock do
+    vault, o ingest e o relatório, cada um até `rotina.tempo_max_s`, mais uma folga para
+    gráficos, varredura, commit e e-mail."""
+    return tempo_autosave(cfg) + 3 * cfg.rotina_tempo_max_s + FOLGA_S
+
+
+def retentar_autosave(ex: Execucao) -> None:
+    """Roda as retentativas vencidas do autosave (conversas cujo salvamento falhou por motivo
+    transitório). É outro processo, que pega o lock do vault sozinho; falha dele vai para o
+    autosave.log e só vira AVISO aqui."""
+    cmd = [sys.executable, "-I", str(RAIZ_REPO / "hooks" / "autosave.py"), "--config", str(ex.cfg.arquivo),
+           "--pendentes"]
+    if ex.dry_run:
+        print("--- autosave (DRY-RUN): as retentativas vencidas rodariam antes do ingest")
+        return
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_BRAIN_SEM_AUTOSAVE"}
+    try:
+        # grupo próprio + SIGTERM antes do SIGKILL: no tempo esgotado o autosave.py recebe SIGTERM,
+        # o handler dele encerra o grupo do `claude` que ele lançou (outro grupo) e só então ele sai;
+        # o que sobrar do grupo leva SIGKILL depois de claude_cmd.ESPERA_TERM_S
+        codigo, _ = claude_cmd.rodar_em_grupo(cmd, tempo_max_s=tempo_autosave(ex.cfg), env=env)
+    except subprocess.TimeoutExpired:
+        ex.log("AVISO retentativas do autosave passaram do tempo (grupo de processos encerrado)")
+        return
+    ex.log(f"{'AVISO ' if codigo else ''}retentativas do autosave rc={codigo}")
 
 
 @dataclass
@@ -143,7 +172,7 @@ def ingest(ex: Execucao, sessoes: list[foco.Sessao]) -> None:
     novos = fontes_mudadas(cfg, estado)
     hoje = foco.dia_de_foco(ex.agora, cfg.foco.virada_hora)[0]
     recentes = foco.filtrar(sessoes, hoje - dt.timedelta(days=6), hoje)
-    assinatura = f"{len(sessoes)}:{max((s.dia for s in sessoes), default='')}"
+    assinatura = foco.assinatura(sessoes)
     if not novos and estado.get("foco") == assinatura:
         ex.log("ingest nada novo (modelo não chamado)")
         if ex.dry_run:
@@ -290,6 +319,7 @@ def limpar_pendencias(ex: Execucao, pend: dict) -> tuple[list[str], list[str]]:
 def executar(ex: Execucao, so_ingest: bool, sem_email: bool, forcar_relatorio: bool) -> int:
     """Roda tudo segurando o lock do vault (o mesmo do autosave): nenhum outro agente escreve
     no vault enquanto o retrato de antes e depois está sendo comparado."""
+    retentar_autosave(ex)
     espera = 0 if ex.dry_run else ex.cfg.rotina_tempo_max_s
     try:
         with trava(trava_do_vault(ex.cfg), espera_s=espera):
@@ -345,7 +375,10 @@ def _executar(ex: Execucao, so_ingest: bool, sem_email: bool, forcar_relatorio: 
             enviar(ex, exemplo)
         return finalizar(ex)
 
-    limpo = varrer(ex, [cfg.vault / r for r in sorted(set(a_commitar) | set(a_enviar))], textos_antes)
+    # varre SEMPRE tudo que a rotina gerou e tudo que está pendente, com ou sem commit e e-mail:
+    # nota com segredo ou código executável é FALHA mesmo que nada saia da máquina
+    varrer_estes = sorted(set(gerados) | set(pend_commit) | set(pend_email) | set(a_commitar) | set(a_enviar))
+    limpo = varrer(ex, [cfg.vault / r for r in varrer_estes], textos_antes)
     if limpo and not ex.falhas:
         if a_commitar and commitar(ex, a_commitar, f"chore(vault): rotina {ex.agora.date().isoformat()} (automático)"):
             a_commitar = []
@@ -400,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.tempo_total:
         print(tempo_total(cfg))
         return 0
-    signal.signal(signal.SIGTERM, _ao_receber_sigterm)
+    claude_cmd.instalar_sigterm()
     log = cfg.log("rotina")
     log(f"inicio dry_run={a.dry_run}")
     ex = Execucao(cfg, log, a.agora or cfg.agora(), a.dry_run)

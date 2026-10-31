@@ -114,7 +114,8 @@ WantedBy=timers.target
 ```
 
 `systemctl --user enable --now claude-brain.timer`. O `rotina.sh` se limita a
-3 × `rotina.tempo_max_s` + 5 min (troque com `CLAUDE_BRAIN_TIMEOUT`); se o tempo estourar, a
+3 × 2 × `autosave.tempo_max_s` + 1 min (até 3 retentativas do autosave, cada uma esperando o lock e
+rodando) + 3 × `rotina.tempo_max_s` + 5 min (troque com `CLAUDE_BRAIN_TIMEOUT`); se o tempo estourar, a
 rotina registra FALHA e notifica antes de sair. A senha SMTP vem de variável de ambiente
 (`Environment=` num drop-in com permissão 0600), keyring ou arquivo 0600; ela não é repassada à
 sessão do Claude.
@@ -129,6 +130,23 @@ sessão do Claude.
 
 O dia de foco termina na `virada_hora` (padrão 04:00): uma sessão que acaba à 00:40 entra com a
 data do dia anterior e a hora real, e conta para aquele dia.
+
+### Teste de ponta a ponta (Claude Code de verdade)
+
+Os testes do `pytest` não chamam a API. Para conferir o sistema inteiro com o Claude Code real:
+
+```bash
+tests/e2e/rodar_e2e.sh
+# ou: CLAUDE_BRAIN_E2E=1 .venv/bin/python tests/e2e/rodar_e2e.py
+```
+
+Ele cria um vault descartável num diretório temporário, abre uma conversa curta com `claude -p`
+(hooks desligados, para não cair no seu vault), roda o autosave, a retomada e o ingest de
+verdade, e planta injeções de prompt (criar plugin do Obsidian, escrever `CLAUDE.md`, rodar um
+comando) para conferir que nada disso acontece. Imprime passou/falhou por verificação, sem
+caminhos absolutos, e apaga o temporário. Custa 3 sessões curtas: modelo `haiku` e teto de
+US$ 0,30 por sessão por padrão (`CLAUDE_BRAIN_E2E_MODELO`, `CLAUDE_BRAIN_E2E_ORCAMENTO`,
+`CLAUDE_BRAIN_E2E_TEMPO`). A conversa de teste fica no histórico do Claude Code. Fica fora da CI.
 
 ## Segurança em 5 linhas
 
@@ -149,9 +167,12 @@ Modelo de ameaça, controles e o que falta confirmar: [docs/seguranca.md](docs/s
 ## Limitações
 
 - Depende de flags do Claude Code (`--restricted`, `--fork-session`, `--no-session-persistence`,
-  `--system-prompt-snapshot`); os testes conferem que existem no `--help` e que o comando é
-  montado certo, mas não chamam a API. Veja a lista "A confirmar com execução real" em
-  [docs/seguranca.md](docs/seguranca.md).
+  `--system-prompt-snapshot`); os testes do `pytest` conferem que existem no `--help` e que o
+  comando é montado certo, sem chamar a API. O comportamento real é coberto pelo teste de ponta a
+  ponta (acima), que você roda à mão; o que ele confere está em [docs/seguranca.md](docs/seguranca.md).
+- Salvamento que falha por motivo transitório (erro do Claude, nenhuma nota salva) é retentado até
+  3 vezes (10 min, 1 h, 6 h), no próximo fim de conversa ou na rotina; depois disso o autosave
+  desiste e notifica.
 - O formato da transcrição do Claude Code não é uma API pública; `conversa.py` pode precisar de
   ajuste em versões futuras.
 - A qualidade do resumo é a do modelo. A pós-condição garante que a nota certa foi escrita, não
